@@ -85,8 +85,8 @@ object Test {
     trait Default extends Parameters {
       val minSuccessfulTests: Int = 100
       val minSize: Int = 0
-      val maxSize: Int = Gen.Params().size
-      val rng: java.util.Random = Gen.Params().rng
+      val maxSize: Int = Gen.P().size
+      val rng: java.util.Random = Gen.P().rng
       val workers: Int = 1
       val testCallback: TestCallback = new TestCallback {}
       val maxDiscardRatio: Float = 5
@@ -261,7 +261,7 @@ object Test {
       var fm = FreqMap.empty[Set[Any]]
       while(!stop && res == null && n < iterations) {
         val size = (minSize: Double) + (sizeStep * (workerIdx + (workers*(n+d))))
-        val propPrms = Prop.Params(Gen.Params(size.round.toInt, params.rng), fm)
+        val propPrms = Prop.Params(Gen.P(size.round.toInt, params.rng), fm)
         secure(p(propPrms)) match {
           case Right(e) => res =
             Result(GenException(e), n, d, FreqMap.empty[Set[Any]])
