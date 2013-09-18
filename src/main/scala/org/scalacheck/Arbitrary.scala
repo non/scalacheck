@@ -238,15 +238,17 @@ object Arbitrary {
     })
 
   /** Arbitrary instance of gen params */
-  private[scalacheck] implicit lazy val arbGenParams: Arbitrary[Gen.P] =
+  implicit lazy val arbGenParams: Arbitrary[Gen.Parameters] =
     Arbitrary(for {
-      size <- arbitrary[Int] suchThat (_ >= 0)
-    } yield Gen.P(size, StdRand))
+      sz <- arbitrary[Int] suchThat (_ >= 0)
+    } yield (new Gen.Parameters.Default {
+      override def size = sz
+    }))
 
   /** Arbitrary instance of prop params */
   implicit lazy val arbPropParams: Arbitrary[Prop.Params] =
     Arbitrary(for {
-      genPrms <- arbitrary[Gen.P]
+      genPrms <- arbitrary[Gen.Parameters]
     } yield Prop.Params(genPrms, FreqMap.empty[immutable.Set[Any]]))
 
 

@@ -145,7 +145,7 @@ object Prop {
   }
 
   /** Property parameters */
-  case class Params(val genPrms: Gen.P, val freqMap: FreqMap[Set[Any]])
+  case class Params(val genPrms: Gen.Parameters, val freqMap: FreqMap[Set[Any]])
 
   object Result {
     def apply(st: Status) = new Result(
@@ -443,7 +443,7 @@ object Prop {
     pv: P => Prop,
     pp: A => Pretty
   ): Prop = Prop { prms =>
-    val gr = g(prms.genPrms)
+    val gr = g.doApply(prms.genPrms)
     gr.retrieve match {
       case None => undecided(prms)
       case Some(x) =>
@@ -466,7 +466,7 @@ object Prop {
     pv: P => Prop,
     pp1: T1 => Pretty
   ): Prop = Prop { prms =>
-    val gr = g1(prms.genPrms)
+    val gr = g1.doApply(prms.genPrms)
     gr.retrieve match {
       case None => undecided(prms)
       case Some(x) =>
@@ -573,7 +573,7 @@ object Prop {
     shrink: T => Stream[T])(f: T => P
   ): Prop = Prop { prms =>
 
-    val gr = g(prms.genPrms)
+    val gr = g.doApply(prms.genPrms)
     val labels = gr.labels.mkString(",")
 
     def result(x: T) = {
