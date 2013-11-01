@@ -241,7 +241,7 @@ object Arbitrary {
     Arbitrary(for {
       sz <- arbitrary[Int] suchThat (_ >= 0)
     } yield (new Gen.Parameters.Default {
-      override def size = sz
+      override val size = sz
     }))
 
   /** Arbitrary instance of prop params */

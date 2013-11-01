@@ -43,7 +43,7 @@ sealed trait Gen[+T] {
   def map[U](f: T => U): Gen[U] = gen { p => doApply(p).map(f) }
 
   def flatMap[U](f: T => Gen[U]): Gen[U] = gen { p =>
-    doApply(p).flatMap(t => f(t).doApply(p))
+    doApply(p).flatMap(t => f(t).doApply(p.reseed))
   }
 
   def filter(p: T => Boolean): Gen[T] = suchThat(p)
@@ -65,7 +65,7 @@ sealed trait Gen[+T] {
    *  and the given generator generates the same result, or both
    *  generators generate no result.  */
   def ==[U](g: Gen[U]) = Prop { prms =>
-    (doApply(prms.genPrms).retrieve, g.doApply(prms.genPrms).retrieve) match {
+    (doApply(prms.genPrms).retrieve, g.doApply(prms.genPrms.reseed).retrieve) match {
       case (None,None) => Prop.proved(prms)
       case (Some(r1),Some(r2)) if r1 == r2 => Prop.proved(prms)
       case _ => Prop.falsified(prms)
@@ -75,7 +75,7 @@ sealed trait Gen[+T] {
   def !=[U](g: Gen[U]) = Prop.forAll(this)(r => Prop.forAll(g)(_ != r))
 
   def !==[U](g: Gen[U]) = Prop { prms =>
-    (doApply(prms.genPrms).retrieve, g.doApply(prms.genPrms).retrieve) match {
+    (doApply(prms.genPrms).retrieve, g.doApply(prms.genPrms.reseed).retrieve) match {
       case (None,None) => Prop.falsified(prms)
       case (Some(r1),Some(r2)) if r1 == r2 => Prop.falsified(prms)
       case _ => Prop.proved(prms)
@@ -154,15 +154,34 @@ object Gen {
 
   /** Generator parameters, used by [[org.scalacheck.Gen.apply]] */
   trait Parameters {
-    def size: Int
-    def rng: java.util.Random
+    val size: Int
+    val seed: Long
+    val rng: Long => Long
 
     /** Change the size parameter */
-    def resize(newSize: Int): Parameters = new Parameters {
+    final def resize(newSize: Int): Parameters = new Parameters {
       val size = newSize
+      val seed = Parameters.this.seed
       val rng = Parameters.this.rng
     }
 
+    /** Change the seed parameter */
+    final def reseed(newSeed: Long): Parameters = new Parameters {
+      val size = Parameters.this.size
+      val seed = newSeed
+      val rng = Parameters.this.rng
+    }
+
+    /** Set a new random seed */
+    final def reseed: Parameters = reseed(rndLong)
+
+    /** Return a random Long using the current seed and rng */
+    final lazy val rndLong: Long = rng(seed)
+
+    /** Return a random Double using the current seed and rng */
+    final lazy val rndDouble: Double = 
+      if(rndLong < 0) (rndLong / (2.0*Long.MinValue)) - 0.5
+      else (rndLong / (2.0*Long.MaxValue)) + 0.5
   }
 
   /** Provides methods for creating [[org.scalacheck.Gen.Parameters]] values */
@@ -170,8 +189,13 @@ object Gen {
     /** Default generator parameters trait. This can be overriden if you
      *  need to tweak the parameters. */
     trait Default extends Parameters {
-      def size: Int = 100
-      def rng: java.util.Random = util.StdRand
+      private val r = scala.util.Random
+      val size: Int = 100
+      val seed = r.nextLong
+      val rng = { s: Long => 
+        r.setSeed(s)
+        r.nextLong
+      }
     }
 
     /** Default generator parameters instance. */
@@ -187,17 +211,19 @@ object Gen {
   /** Provides implicit [[org.scalacheck.Gen.Choose]] instances */
   object Choose {
 
-    private def chLng(l: Long, h: Long)(p: P): R[Long] = {
+    private def chLng(l: Long, h: Long)(p0: P): R[Long] = {
       if (h < l) r(None) else {
         val d = h - l + 1
         if (d <= 0) {
-          var n = p.rng.nextLong
+          var p = p0
+          var n = p.rndLong
           while (n < l || n > h) {
-            n = p.rng.nextLong
+            n = p.rndLong
+            p = p.reseed
           }
           r(Some(n))
         } else {
-          r(Some(l + math.abs(p.rng.nextLong % d)))
+          r(Some(l + math.abs(p0.rndLong % d)))
         }
       }
     }
@@ -206,7 +232,7 @@ object Gen {
       val d = h-l
       if (d < 0 || d > Double.MaxValue) r(None)
       else if (d == 0) r(Some(l))
-      else r(Some(p.rng.nextDouble * (h-l) + l))
+      else r(Some(p.rndDouble * (h-l) + l))
     }
 
     implicit val chooseLong: Choose[Long] = new Choose[Long] {
@@ -261,10 +287,10 @@ object Gen {
   /** Sequences generators. If any of the given generators fails, the
    *  resulting generator will also fail. */
   def sequence[C[_],T](gs: Traversable[Gen[T]])(implicit b: Buildable[T,C]): Gen[C[T]] = {
-    val g = gen { p =>
-      gs.foldLeft(r(Some(collection.immutable.Vector.empty[T]))) {
-        case (rs,g) => g.doApply(p).flatMap(r => rs.map(_ :+ r))
-      }
+    val g = gen { p0 =>
+      (gs.foldLeft((r(Some(collection.immutable.Vector.empty[T])),p0)) {
+        case ((rs,p),g) => (g.doApply(p).flatMap(r => (rs.map(_ :+ r))),p.reseed)
+      })._1
     }
     g.map(b.fromIterable)
   }
@@ -272,10 +298,10 @@ object Gen {
   /** Sequences generators. If any of the given generators fails, the
    *  resulting generator will also fail. */
   def sequence[C[_,_],T,U](gs: Traversable[Gen[(T,U)]])(implicit b: Buildable2[T,U,C]): Gen[C[T,U]] = {
-    val g = gen { p =>
-      gs.foldLeft(r(Some(collection.immutable.Vector.empty[(T,U)]))) {
-        case (rs,g) => g.doApply(p).flatMap(r => rs.map(_ :+ r))
-      }
+    val g = gen { p0 =>
+      (gs.foldLeft((r(Some(collection.immutable.Vector.empty[(T,U)])),p0)) {
+        case ((rs,p),g) => (g.doApply(p).flatMap(r => (rs.map(_ :+ r))),p.reseed)
+      })._1
     }
     g.map(b.fromIterable)
   }
@@ -465,10 +491,14 @@ object Gen {
   /** A generator that picks a given number of elements from a list, randomly */
   def pick[T](n: Int, l: Iterable[T]): Gen[Seq[T]] =
     if(n > l.size || n < 0) fail
-    else (gen { p =>
+    else (gen { p0 =>
       val b = new collection.mutable.ListBuffer[T]
       b ++= l
-      while(b.length > n) b.remove(choose(0, b.length-1).doApply(p).retrieve.get)
+      var p = p0
+      while(b.length > n) {
+        b.remove(choose(0, b.length-1).doApply(p).retrieve.get)
+        p = p.reseed
+      }
       r(Some(b))
     }).suchThat(_.forall(x => l.exists(x == _)))
 

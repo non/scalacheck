@@ -19,37 +19,41 @@ object Test {
   trait Parameters {
     /** The minimum number of tests that must succeed for ScalaCheck to
      *  consider a property passed. */
-    def minSuccessfulTests: Int
+    val minSuccessfulTests: Int
 
     /** The starting size given as parameter to the generators. */
-    def minSize: Int
+    val minSize: Int
 
     /** The maximum size given as parameter to the generators. */
-    def maxSize: Int
+    val maxSize: Int
 
-    /** The random numbe generator used. */
-    def rng: java.util.Random
+    /** The initial random seed. */
+    val seed: Long
+
+    /** The random number generator used. */
+    val rng: Long => Long
 
     /** The number of tests run in parallell. */
-    def workers: Int
+    val workers: Int
 
     /** A callback that ScalaCheck calls each time a test is executed. */
-    def testCallback: TestCallback
+    val testCallback: TestCallback
 
     /** The maximum ratio between discarded and passed tests allowed before
      *  ScalaCheck gives up and discards the property. At least
      *  `minSuccesfulTests` will always be run, though. */
-    def maxDiscardRatio: Float
+    val maxDiscardRatio: Float
 
     /** A custom class loader that should be used during test execution. */
-    def customClassLoader: Option[ClassLoader]
+    val customClassLoader: Option[ClassLoader]
 
     // private since we can't guarantee binary compatibility for this one
     private[scalacheck] def copy(
       _minSuccessfulTests: Int = Parameters.this.minSuccessfulTests,
       _minSize: Int = Parameters.this.minSize,
       _maxSize: Int = Parameters.this.maxSize,
-      _rng: java.util.Random = Parameters.this.rng,
+      _seed: Long = Parameters.this.seed,
+      _rng: Long => Long = Parameters.this.rng,
       _workers: Int = Parameters.this.workers,
       _testCallback: TestCallback = Parameters.this.testCallback,
       _maxDiscardRatio: Float = Parameters.this.maxDiscardRatio,
@@ -58,7 +62,8 @@ object Test {
       val minSuccessfulTests: Int = _minSuccessfulTests
       val minSize: Int = _minSize
       val maxSize: Int = _maxSize
-      val rng: java.util.Random = _rng
+      val seed: Long = _seed
+      val rng: Long => Long = _rng
       val workers: Int = _workers
       val testCallback: TestCallback = _testCallback
       val maxDiscardRatio: Float = _maxDiscardRatio
@@ -85,7 +90,8 @@ object Test {
       val minSuccessfulTests: Int = 100
       val minSize: Int = 0
       val maxSize: Int = Gen.Parameters.default.size
-      val rng: java.util.Random = Gen.Parameters.default.rng
+      val seed: Long = Gen.Parameters.default.seed
+      val rng: Long => Long = Gen.Parameters.default.rng
       val workers: Int = 1
       val testCallback: TestCallback = new TestCallback {}
       val maxDiscardRatio: Float = 5
@@ -107,7 +113,8 @@ object Test {
     succeeded: Int,
     discarded: Int,
     freqMap: FreqMap[Set[Any]],
-    time: Long = 0
+    time: Long,
+    seed: Long
   ) {
     def passed = status match {
       case Passed => true
@@ -242,12 +249,19 @@ object Test {
       assert(!p.isInstanceOf[Commands], "Commands cannot be checked multi-threaded")
     }
 
+    // Intermediate result
+    case class R(s: Option[Status], n: Int, d: Int, fm: FreqMap[Set[Any]])
+
     val iterations = math.ceil(minSuccessfulTests / (workers: Double))
     val sizeStep = (maxSize-minSize) / (iterations*workers)
+    val seed0 = params.seed
     var stop = false
-    val genPrms = new Gen.Parameters.Default { override val rng = params.rng }
+    val genPrms = new Gen.Parameters.Default {
+      override val seed = seed0
+      override val rng = params.rng
+    }
 
-    def worker(workerIdx: Int): () => Result =
+    def worker(workerIdx: Int): () => R =
       if (workers < 2) () => workerFun(workerIdx) 
       else spawn {
         params.customClassLoader.map(Thread.currentThread.setContextClassLoader(_))
@@ -261,75 +275,74 @@ object Test {
     }
 
     def workerFun(workerIdx: Int) = {
-      var n = 0  // passed tests
-      var d = 0  // discarded tests
-      var res: Result = null
-      var fm = FreqMap.empty[Set[Any]]
-      while(!stop && res == null && n < iterations) {
-        val size = (minSize: Double) + (sizeStep * (workerIdx + (workers*(n+d))))
-        val propPrms = Prop.Params(genPrms.resize(size.round.toInt), fm)
+      var res = R(None, 0, 0, FreqMap.empty[Set[Any]])
+      while(!stop && !res.s.isDefined && res.n < iterations) {
+        val size =
+          (minSize: Double) + (sizeStep * (workerIdx + (workers*(res.n+res.d))))
+        val propPrms = Prop.Params(genPrms.resize(size.round.toInt), res.fm)
         secure(p(propPrms)) match {
-          case Right(e) => res =
-            Result(GenException(e), n, d, FreqMap.empty[Set[Any]])
+          case Right(e) =>
+            res.copy(s = Some(GenException(e)), fm = FreqMap.empty[Set[Any]])
           case Left(propRes) =>
-            fm =
-              if(propRes.collected.isEmpty) fm
-              else fm + propRes.collected
+            res = res.copy(fm =
+              if(propRes.collected.isEmpty) res.fm
+              else res.fm + propRes.collected
+            )
             propRes.status match {
               case Prop.Undecided =>
-                d += 1
-                testCallback.onPropEval("", workerIdx, n, d)
+                res = res.copy(d = res.d + 1)
+                testCallback.onPropEval("", workerIdx, res.n, res.d)
                 // The below condition is kind of hacky. We have to have
                 // some margin, otherwise workers might stop testing too
                 // early because they have been exhausted, but the overall
                 // test has not.
-                if (n+d > minSuccessfulTests && 1+workers*maxDiscardRatio*n < d)
-                  res = Result(Exhausted, n, d, fm)
+                if (res.n+res.d > minSuccessfulTests && 
+                    1+workers*maxDiscardRatio*res.n < res.d)
+                  res = res.copy(s = Some(Exhausted))
               case Prop.True =>
-                n += 1
-                testCallback.onPropEval("", workerIdx, n, d)
+                res = res.copy(n = res.n + 1)
+                testCallback.onPropEval("", workerIdx, res.n, res.d)
               case Prop.Proof =>
-                n += 1
-                res = Result(Proved(propRes.args), n, d, fm)
+                res = res.copy(s = Some(Proved(propRes.args)), n = res.n + 1)
                 stop = true
               case Prop.False =>
-                res = Result(Failed(propRes.args,propRes.labels), n, d, fm)
+                res = res.copy(s = Some(Failed(propRes.args,propRes.labels)))
                 stop = true
               case Prop.Exception(e) =>
-                res = Result(PropException(propRes.args,e,propRes.labels), n, d, fm)
+                res = res.copy(s = Some(PropException(propRes.args,e,propRes.labels)))
                 stop = true
             }
         }
       }
-      if (res == null) {
-        if (maxDiscardRatio*n > d) Result(Passed, n, d, fm)
-        else Result(Exhausted, n, d, fm)
+      if (!res.s.isDefined) {
+        if (maxDiscardRatio*res.n > res.d) res.copy(s = Some(Passed))
+        else res.copy(s = Some(Exhausted))
       } else res
     }
 
-    def mergeResults(r1: () => Result, r2: () => Result) = {
-      val Result(st1, s1, d1, fm1, _) = r1()
-      val Result(st2, s2, d2, fm2, _) = r2()
+    def mergeResults(r1: () => R, r2: () => R) = {
+      val R(Some(st1), s1, d1, fm1) = r1()
+      val R(Some(st2), s2, d2, fm2) = r2()
       if (st1 != Passed && st1 != Exhausted)
-        () => Result(st1, s1+s2, d1+d2, fm1++fm2, 0)
+        () => R(Some(st1), s1+s2, d1+d2, fm1++fm2)
       else if (st2 != Passed && st2 != Exhausted)
-        () => Result(st2, s1+s2, d1+d2, fm1++fm2, 0)
+        () => R(Some(st2), s1+s2, d1+d2, fm1++fm2)
       else {
         if (s1+s2 >= minSuccessfulTests && maxDiscardRatio*(s1+s2) >= (d1+d2))
-          () => Result(Passed, s1+s2, d1+d2, fm1++fm2, 0)
+          () => R(Some(Passed), s1+s2, d1+d2, fm1++fm2)
         else
-          () => Result(Exhausted, s1+s2, d1+d2, fm1++fm2, 0)
+          () => R(Some(Exhausted), s1+s2, d1+d2, fm1++fm2)
       }
     }
 
     val start = System.currentTimeMillis
     val results = for(i <- 0 until workers) yield worker(i)
-    val r = results.reduceLeft(mergeResults)()
+    val R(Some(s),n,d,fm) = results.reduceLeft(mergeResults)()
     stop = true
     results foreach (_.apply())
-    val timedRes = r.copy(time = System.currentTimeMillis-start)
-    params.testCallback.onTestResult("", timedRes)
-    timedRes
+    val res = Result(s,n,d,fm,System.currentTimeMillis-start,seed0)
+    params.testCallback.onTestResult("", res)
+    res
   }
 
   /** Check a set of properties. */
